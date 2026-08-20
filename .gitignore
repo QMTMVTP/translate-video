@@ -1,8 +1,14 @@
 node_modules/
 .pnpm-store/
+
 .env
+.env.*
+!.env.example
+
 temp/
 *.log
-TAI LIEU_KIEN TRUC VA HAM VIDEOSUB AI.pdfTAI LIEU KIEN TRUC VA HAM VIDEOSUB AI.pdf
-TAI LIEU KIEN TRUC VA HAM VIDEOSUB AI.pdf
+
 TAI_LIEU_KIEN_TRUC_VA_HAM_VIDEOSUB_AI.pdf
+
+bin/yt-dlp.exe
+bin/yt-dlp
