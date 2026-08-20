@@ -1,0 +1,28 @@
+{
+  "name": "video-translator",
+  "version": "1.0.0",
+  "description": "Dịch video và thêm phụ đề tiếng Việt tự động",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
+    "fs-extra": "^11.2.0",
+    "groq-sdk": "^0.7.0",
+    "multer": "^2.2.0",
+    "pdfkit": "^0.19.1",
+    "uuid": "^9.0.1",
+    "yt-dlp-wrap": "^2.3.12"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
