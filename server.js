@@ -37,7 +37,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 200 * 1024 * 1024 }, // 500 MB max
+  limits: { fileSize: 150 * 1024 * 1024 }, // 500 MB max
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const isVideoExt = /\.(mp4|mkv|mov|webm|avi|flv|m4v|wmv|ts|3gp|ogv)$/i.test(ext);
@@ -180,12 +180,81 @@ app.get('/api/video/:jobId', (req, res) => {
   }
 });
 
-app.get('/api/download/:jobId', (req, res) => {
-  const outputPath = path.join(__dirname, 'temp', req.params.jobId, 'video-vietsub.mp4');
-  if (!fs.existsSync(outputPath)) {
-    return res.status(404).json({ error: 'File MP4 có phụ đề không tìm thấy.' });
+app.get('/api/download/:jobId', async (req, res) => {
+  try {
+    const jobId = req.params.jobId;
+
+    // Chỉ cho phép UUID hợp lệ
+    if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
+      return res.status(400).json({
+        error: 'Job ID không hợp lệ.',
+      });
+    }
+
+    const outputPath = path.join(
+      __dirname,
+      'temp',
+      jobId,
+      'video-vietsub.mp4'
+    );
+
+    // Kiểm tra file
+    if (!(await fs.pathExists(outputPath))) {
+      const job = jobs.get(jobId);
+
+      console.error('[Download] File không tồn tại:', outputPath);
+
+      return res.status(404).json({
+        error: 'File video chưa sẵn sàng hoặc đã bị xóa.',
+        status: job?.status || 'unknown',
+        message: job?.message || null,
+      });
+    }
+
+    const stat = await fs.stat(outputPath);
+
+    if (!stat.isFile() || stat.size === 0) {
+      return res.status(404).json({
+        error: 'File video rỗng hoặc không hợp lệ.',
+      });
+    }
+
+    console.log(
+      `[Download] ${jobId} - ${(stat.size / 1024 / 1024).toFixed(1)} MB`
+    );
+
+    // Headers để trình duyệt/mobile xử lý download ổn định
+    res.status(200);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Length', stat.size);
+    res.setHeader('Content-Disposition', 'attachment; filename="video-vietsub.mp4"');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache');
+
+    const stream = fs.createReadStream(outputPath);
+
+    stream.on('error', (err) => {
+      console.error('[Download Stream Error]', err);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Không thể đọc file video.',
+        });
+      } else {
+        res.destroy(err);
+      }
+    });
+
+    stream.pipe(res);
+  } catch (err) {
+    console.error('[Download Error]', err);
+
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: `Lỗi tải video: ${err.message}`,
+      });
+    }
   }
-  res.download(outputPath, 'video-vietsub.mp4');
 });
 
 // ─── POST /api/subtitles/:jobId (Update subtitles & re-burn MP4) ────────────
@@ -215,19 +284,52 @@ app.post('/api/subtitles/:jobId', async (req, res) => {
     const subtitlePath = path.join(outputDir, subtitleFilename);
     await fs.writeFile(subtitlePath, srtContent, 'utf-8');
 
-    // Re-burn subtitles to video-vietsub.mp4
+    update(97, '🎬 Đang chèn phụ đề tiếng Việt vào video MP4...');
+
     await burnSubtitlesToVideo(outputDir, subtitleFilename);
 
-    // Update in-memory job if exists
-    const current = jobs.get(jobId);
-    if (current) {
-      jobs.set(jobId, {
-        ...current,
-        vttContent,
-        segments: segments || current.segments,
-        logs: appendJobLog(current, 'Đã cập nhật phụ đề chỉnh sửa vào video MP4.'),
-      });
+    // KIỂM TRA FILE VIDEO SAU KHI FFMPEG CHẠY
+    const finalVideoPath = path.join(
+      outputDir,
+      'video-vietsub.mp4'
+    );
+
+    if (!(await fs.pathExists(finalVideoPath))) {
+      throw new Error(
+        'Không tìm thấy video-vietsub.mp4 sau khi FFmpeg hoàn tất.'
+      );
     }
+
+    const finalVideoStat = await fs.stat(finalVideoPath);
+
+    if (finalVideoStat.size === 0) {
+      throw new Error(
+        'Video-vietsub.mp4 được tạo nhưng file bị rỗng.'
+      );
+    }
+
+    console.log(
+      `[runJob] Video hoàn tất: ${(finalVideoStat.size / 1024 / 1024).toFixed(1)} MB`
+    );
+
+    const current = jobs.get(jobId) || {};
+
+    jobs.set(jobId, {
+      ...current,
+      status: 'done',
+      percent: 100,
+      step: 4,
+      stepPercent: 100,
+      message: '✅ Hoàn tất!',
+      videoUrl: `/api/video/${jobId}`,
+      downloadUrl: `/api/download/${jobId}`,
+      vttContent,
+      segments: translated,
+      logs: appendJobLog(
+        current,
+        'Đã hoàn tất xử lý video và chèn phụ đề tiếng Việt.'
+      ),
+    });
 
     res.json({
       success: true,
@@ -249,51 +351,144 @@ app.post('/api/subtitles/:jobId', async (req, res) => {
  * Hardsub / burn subtitles directly into video frames
  * Runs in workDir so relative subtitle file name avoids Windows path colon escaping issues.
  */
-function burnSubtitlesToVideo(workDir, subtitleFilename = 'subtitles.vi.srt') {
+function burnSubtitlesToVideo(
+  workDir,
+  subtitleFilename = 'subtitles.vi.srt'
+) {
   return new Promise((resolve, reject) => {
+    const outputPath = path.join(workDir, 'video-vietsub.mp4');
+
+    const subtitleFilter =
+      `subtitles=${subtitleFilename}:` +
+      `force_style='FontName=Arial,` +
+      `FontSize=20,` +
+      `PrimaryColour=&H00FFFFFF,` +
+      `OutlineColour=&H00000000,` +
+      `BorderStyle=1,` +
+      `Outline=2,` +
+      `Shadow=1,` +
+      `MarginV=25'`;
+
     const args = [
-      '-i', 'video.mp4',
-      '-vf', `subtitles=${subtitleFilename}:force_style='FontName=Arial,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=25'`,
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '22',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      '-movflags', '+faststart',
-      '-y', 'video-vietsub.mp4',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+
+      '-i',
+      'video.mp4',
+
+      // Giới hạn video 720p để giảm CPU/RAM và kích thước file
+      '-vf',
+      `scale=-2:720:force_original_aspect_ratio=decrease,${subtitleFilter}`,
+
+      // Encoder nhẹ hơn cho Render Free
+      '-c:v',
+      'libx264',
+
+      '-preset',
+      'ultrafast',
+
+      '-crf',
+      '28',
+
+      // Audio nhẹ
+      '-c:a',
+      'aac',
+
+      '-b:a',
+      '64k',
+
+      '-movflags',
+      '+faststart',
+
+      '-threads',
+      '1',
+
+      '-y',
+      'video-vietsub.mp4',
     ];
 
-    execFile(ffmpegPath, args, { cwd: workDir }, (err, _stdout, stderr) => {
-      if (err) {
-        console.warn('[burnSubtitlesToVideo] Hardsub re-encode failed, falling back to soft subtitles:', stderr || err.message);
-        // Fallback: embed soft subtitle track
-        execFile(
-          ffmpegPath,
-          [
-            '-i', 'video.mp4',
-            '-i', subtitleFilename,
-            '-map', '0:v:0',
-            '-map', '0:a?',
-            '-map', '1:0',
-            '-c:v', 'copy',
-            '-c:a', 'copy',
-            '-c:s', 'mov_text',
-            '-metadata:s:s:0', 'language=vie',
-            '-metadata:s:s:0', 'title=Tiếng Việt',
-            '-y', 'video-vietsub.mp4',
-          ],
-          { cwd: workDir },
-          (fallbackErr, _stdout2, fallbackStderr) => {
-            if (fallbackErr) {
-              reject(new Error(`Không thể xuất video có phụ đề: ${fallbackStderr || fallbackErr.message}`));
-            } else {
-              resolve();
-            }
-          }
-        );
-      } else {
-        resolve();
+    console.log('[FFmpeg] Starting subtitle burn...');
+    console.log('[FFmpeg] Working directory:', workDir);
+
+    const ffmpegProcess = spawn(ffmpegPath, args, {
+      cwd: workDir,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderr = '';
+
+    ffmpegProcess.stderr.on('data', (data) => {
+      const text = data.toString();
+
+      stderr += text;
+
+      // Không giữ log quá lớn trong RAM
+      if (stderr.length > 10000) {
+        stderr = stderr.slice(-10000);
       }
+    });
+
+    ffmpegProcess.on('error', (err) => {
+      console.error('[FFmpeg Error]', err);
+
+      reject(
+        new Error(
+          `Không thể khởi động FFmpeg: ${err.message}`
+        )
+      );
+    });
+
+    ffmpegProcess.on('close', async (code) => {
+      if (code === 0) {
+        try {
+          const exists = await fs.pathExists(outputPath);
+
+          if (!exists) {
+            reject(
+              new Error(
+                'FFmpeg báo thành công nhưng không tìm thấy video-vietsub.mp4.'
+              )
+            );
+            return;
+          }
+
+          const stat = await fs.stat(outputPath);
+
+          if (stat.size === 0) {
+            reject(
+              new Error(
+                'FFmpeg tạo video-vietsub.mp4 nhưng file bị rỗng.'
+              )
+            );
+            return;
+          }
+
+          console.log(
+            `[FFmpeg] Done: ${(stat.size / 1024 / 1024).toFixed(1)} MB`
+          );
+
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+
+        return;
+      }
+
+      console.error(
+        `[FFmpeg] Process exited with code ${code}`
+      );
+
+      console.error(stderr);
+
+      reject(
+        new Error(
+          `FFmpeg không thể chèn phụ đề. Mã lỗi: ${code}. ` +
+          `${stderr.slice(-3000)}`
+        )
+      );
     });
   });
 }
