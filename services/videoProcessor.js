@@ -1,51 +1,102 @@
 const { execFile, spawn } = require('child_process');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const path = require('path');
 const fs = require('fs-extra');
 const ffmpegPath = require('ffmpeg-static');
 
 const BIN_DIR = path.join(__dirname, '..', 'bin');
+const BIN_PATH = path.join(
+  BIN_DIR,
+  process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
+);
 
 let ytDlpPath = null;
 
 /**
- * Get yt-dlp executable.
+ * Maximum video size we allow the processor to work with.
  *
- * Local Windows:
- *   bin/yt-dlp.exe
+ * This is mainly a safety limit for Render Free.
+ * 200 MB is much safer than allowing 500 MB+ files on a 512 MB instance.
+ */
+const MAX_VIDEO_SIZE = 200 * 1024 * 1024;
+
+/**
+ * Check whether a downloaded file is valid.
+ */
+async function verifyVideoFile(videoPath) {
+  if (!(await fs.pathExists(videoPath))) {
+    throw new Error('File video không tồn tại sau khi tải.');
+  }
+
+  const stat = await fs.stat(videoPath);
+
+  if (!stat.isFile() || stat.size <= 0) {
+    throw new Error('File video rỗng hoặc không hợp lệ.');
+  }
+
+  if (stat.size > MAX_VIDEO_SIZE) {
+    await fs.remove(videoPath).catch(() => {});
+
+    throw new Error(
+      `Video quá lớn. Giới hạn hiện tại là ${Math.round(
+        MAX_VIDEO_SIZE / 1024 / 1024
+      )} MB để tránh máy chủ hết RAM.`
+    );
+  }
+
+  return stat.size;
+}
+
+/**
+ * Find yt-dlp.
  *
- * Render/Linux:
- *   yt-dlp installed by Render build command
+ * Windows:
+ *   ./bin/yt-dlp.exe
+ *
+ * Linux / Render:
+ *   system command "yt-dlp"
  */
 async function getYtDlp(onProgress) {
   if (ytDlpPath) {
     return ytDlpPath;
   }
 
-  // Windows local development
+  // ---------------------------------------------------------
+  // Windows
+  // ---------------------------------------------------------
   if (process.platform === 'win32') {
-    const localPath = path.join(BIN_DIR, 'yt-dlp.exe');
+    await fs.ensureDir(BIN_DIR);
 
-    if (await fs.pathExists(localPath)) {
-      console.log(`[yt-dlp] Using local binary: ${localPath}`);
+    const hasBinary = await fs.pathExists(BIN_PATH);
 
-      ytDlpPath = localPath;
+    console.log(
+      `[yt-dlp] Windows binary ${
+        hasBinary ? 'đã tìm thấy' : 'không tìm thấy'
+      }: ${BIN_PATH}`
+    );
 
-      onProgress &&
-        onProgress(
-          '🔧 Đã tìm thấy yt-dlp, đang khởi động công cụ tải video...',
-          12
-        );
-
-      return ytDlpPath;
+    if (!hasBinary) {
+      throw new Error(
+        'Không tìm thấy bin/yt-dlp.exe. Vui lòng đặt yt-dlp.exe vào thư mục bin/.'
+      );
     }
 
-    throw new Error(
-      'Không tìm thấy bin/yt-dlp.exe trên Windows.'
-    );
+    ytDlpPath = BIN_PATH;
+
+    onProgress &&
+      onProgress(
+        '🔧 Đã tìm thấy yt-dlp, đang khởi động công cụ tải video...',
+        12
+      );
+
+    return ytDlpPath;
   }
 
+  // ---------------------------------------------------------
   // Linux / Render
-  console.log('[yt-dlp] Using system yt-dlp');
+  // ---------------------------------------------------------
+  console.log('[yt-dlp] Linux/Render: using system yt-dlp');
 
   ytDlpPath = 'yt-dlp';
 
@@ -59,29 +110,133 @@ async function getYtDlp(onProgress) {
 }
 
 /**
- * Detect platform name from URL
+ * Detect platform name from URL.
  */
 function getPlatformName(url) {
-  if (/youtube\.com|youtu\.be/i.test(url)) return 'YouTube';
-  if (/tiktok\.com/i.test(url)) return 'TikTok';
-  if (/facebook\.com|fb\.com|fb\.watch/i.test(url)) return 'Facebook';
-  if (/instagram\.com/i.test(url)) return 'Instagram';
-  if (/twitter\.com|x\.com/i.test(url)) return 'Twitter/X';
+  if (/youtube\.com|youtu\.be/i.test(url)) {
+    return 'YouTube';
+  }
+
+  if (/tiktok\.com/i.test(url)) {
+    return 'TikTok';
+  }
+
+  if (/facebook\.com|fb\.com|fb\.watch/i.test(url)) {
+    return 'Facebook';
+  }
+
+  if (/instagram\.com/i.test(url)) {
+    return 'Instagram';
+  }
+
+  if (/twitter\.com|x\.com/i.test(url)) {
+    return 'Twitter/X';
+  }
 
   return 'video';
 }
 
 /**
- * Check if URL is TikTok
+ * Check if URL is TikTok.
  */
 function isTikTokUrl(url) {
   return /tiktok\.com/i.test(url);
 }
 
 /**
- * Download TikTok video using TikWM API
+ * Check if URL is a direct video file.
  */
-async function downloadTikTokVideo(url, outputPath, onProgress) {
+function isDirectVideoUrl(url) {
+  return /\.(mp4|webm|mov|mkv|avi|flv|m4v)(\?.*)?$/i.test(url);
+}
+
+/**
+ * Stream HTTP response directly to disk.
+ *
+ * IMPORTANT:
+ * We intentionally do NOT do:
+ *
+ *   const chunks = [];
+ *   chunks.push(...)
+ *   Buffer.concat(chunks)
+ *
+ * because that can consume hundreds of MB of RAM.
+ */
+async function streamResponseToFile(response, outputPath, onProgress) {
+  if (!response.body) {
+    throw new Error('Máy chủ không trả về dữ liệu video.');
+  }
+
+  const contentLength = response.headers.get('content-length');
+  const totalBytes = contentLength
+    ? parseInt(contentLength, 10)
+    : 0;
+
+  let receivedBytes = 0;
+  let lastReportedPercent = -1;
+
+  // Convert Web ReadableStream -> Node.js Readable
+  const sourceStream = Readable.fromWeb(response.body);
+
+  const progressStream = new (require('stream').Transform)({
+    transform(chunk, encoding, callback) {
+      receivedBytes += chunk.length;
+
+      if (totalBytes > 0 && onProgress) {
+        const percent = Math.min(
+          100,
+          Math.round((receivedBytes / totalBytes) * 100)
+        );
+
+        if (percent !== lastReportedPercent) {
+          lastReportedPercent = percent;
+
+          const mapped = Math.round(
+            12 + (percent / 100) * 20
+          );
+
+          onProgress(
+            `📥 Đang tải... ${percent}%`,
+            mapped
+          );
+        }
+      }
+
+      callback(null, chunk);
+    },
+  });
+
+  await pipeline(
+    sourceStream,
+    progressStream,
+    fs.createWriteStream(outputPath)
+  );
+}
+
+/**
+ * Download TikTok video using TikWM API.
+ *
+ * The important RAM optimization here is:
+ *
+ * TikTok
+ *   ↓
+ * fetch stream
+ *   ↓
+ * file on disk
+ *
+ * NOT:
+ *
+ * TikTok
+ *   ↓
+ * RAM Buffer
+ *   ↓
+ * file
+ */
+async function downloadTikTokVideo(
+  url,
+  outputPath,
+  onProgress
+) {
   onProgress &&
     onProgress('📥 Đang kết nối tới TikTok...', 12);
 
@@ -90,15 +245,17 @@ async function downloadTikTokVideo(url, outputPath, onProgress) {
     headers: {
       'Content-Type':
         'application/x-www-form-urlencoded; charset=UTF-8',
+
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     },
+
     body: new URLSearchParams({
       url,
-      count: 12,
-      cursor: 0,
-      web: 1,
-      hd: 1,
+      count: '12',
+      cursor: '0',
+      web: '1',
+      hd: '1',
     }),
   });
 
@@ -133,12 +290,16 @@ async function downloadTikTokVideo(url, outputPath, onProgress) {
     : `https://www.tikwm.com${playUrl}`;
 
   onProgress &&
-    onProgress('📥 Đang tải video TikTok...', 18);
+    onProgress(
+      '📥 Đang tải video TikTok...',
+      18
+    );
 
   const vidRes = await fetch(fullDownloadUrl, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+
       Referer: 'https://www.tiktok.com/',
     },
   });
@@ -149,58 +310,20 @@ async function downloadTikTokVideo(url, outputPath, onProgress) {
     );
   }
 
-  const contentLength =
-    vidRes.headers.get('content-length');
-
-  const totalBytes = contentLength
-    ? parseInt(contentLength, 10)
-    : 0;
-
-  const chunks = [];
-  let received = 0;
-
-  const reader = vidRes.body.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-
-    if (done) break;
-
-    chunks.push(value);
-    received += value.length;
-
-    if (totalBytes > 0 && onProgress) {
-      const pct = Math.round(
-        18 + (received / totalBytes) * 14
-      );
-
-      onProgress(
-        `📥 Đang tải video TikTok... ${Math.round(
-          (received / totalBytes) * 100
-        )}%`,
-        pct
-      );
-    }
-  }
-
-  const buffer = Buffer.concat(
-    chunks.map((c) => Buffer.from(c))
+  await streamResponseToFile(
+    vidRes,
+    outputPath,
+    onProgress
   );
 
-  await fs.writeFile(outputPath, buffer);
+  await verifyVideoFile(outputPath);
 }
 
 /**
- * Check direct video URL
- */
-function isDirectVideoUrl(url) {
-  return /\.(mp4|webm|mov|mkv|avi|flv|m4v)(\?.*)?$/i.test(
-    url
-  );
-}
-
-/**
- * Download direct video URL
+ * Download direct video URL.
+ *
+ * Streams directly to disk instead of keeping
+ * the entire video in RAM.
  */
 async function downloadDirectVideo(
   url,
@@ -208,7 +331,10 @@ async function downloadDirectVideo(
   onProgress
 ) {
   onProgress &&
-    onProgress('📥 Đang tải video trực tiếp...', 12);
+    onProgress(
+      '📥 Đang tải video trực tiếp...',
+      12
+    );
 
   const response = await fetch(url);
 
@@ -218,49 +344,17 @@ async function downloadDirectVideo(
     );
   }
 
-  const contentLength =
-    response.headers.get('content-length');
-
-  const totalBytes = contentLength
-    ? parseInt(contentLength, 10)
-    : 0;
-
-  const chunks = [];
-  let received = 0;
-
-  const reader = response.body.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-
-    if (done) break;
-
-    chunks.push(value);
-    received += value.length;
-
-    if (totalBytes > 0 && onProgress) {
-      const pct = Math.round(
-        12 + (received / totalBytes) * 18
-      );
-
-      onProgress(
-        `📥 Đang tải... ${Math.round(
-          (received / totalBytes) * 100
-        )}%`,
-        pct
-      );
-    }
-  }
-
-  const buffer = Buffer.concat(
-    chunks.map((c) => Buffer.from(c))
+  await streamResponseToFile(
+    response,
+    outputPath,
+    onProgress
   );
 
-  await fs.writeFile(outputPath, buffer);
+  await verifyVideoFile(outputPath);
 }
 
 /**
- * Download video using yt-dlp
+ * Download video using yt-dlp.
  */
 async function downloadWithYtDlp(
   url,
@@ -286,21 +380,52 @@ async function downloadWithYtDlp(
   return new Promise((resolve, reject) => {
     const args = [
       url,
+
       '-o',
       outputPath,
+
+      // Prefer MP4 <= 1080p.
       '--format',
       'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+
       '--merge-output-format',
       'mp4',
+
       '--no-playlist',
+
       '--no-warnings',
+
       '--progress',
+
+      // Use ffmpeg-static bundled with Node package.
       '--ffmpeg-location',
       ffmpegPath,
+
+      // JavaScript runtime.
       '--js-runtimes',
       `node:${process.execPath}`,
+
+      // YouTube player client.
       '--extractor-args',
       'youtube:player_client=web_embedded',
+
+      // ---------------------------------------------------
+      // RAM optimization
+      // ---------------------------------------------------
+
+      // Only one fragment at a time.
+      '--concurrent-fragments',
+      '1',
+
+      // Smaller internal buffer.
+      '--buffer-size',
+      '1M',
+
+      // Do not keep unnecessary metadata.
+      '--no-mtime',
+
+      // Continue partial download if possible.
+      '--continue',
     ];
 
     const ytProcess = spawn(
@@ -308,6 +433,7 @@ async function downloadWithYtDlp(
       args,
       {
         windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
 
@@ -325,9 +451,7 @@ async function downloadWithYtDlp(
     const reportYtDlpOutput = (data) => {
       const str = data.toString();
 
-      const match = str.match(
-        /(\d+\.?\d*)%/
-      );
+      const match = str.match(/(\d+\.?\d*)%/);
 
       if (match && onProgress) {
         const dlPct = parseFloat(match[1]);
@@ -355,7 +479,11 @@ async function downloadWithYtDlp(
     );
 
     ytProcess.stderr.on('data', (data) => {
-      lastErrorOutput += data.toString();
+      const str = data.toString();
+
+      // Keep only the last 2KB of error output.
+      // This prevents unnecessary memory growth.
+      lastErrorOutput += str;
 
       if (lastErrorOutput.length > 2000) {
         lastErrorOutput =
@@ -365,9 +493,16 @@ async function downloadWithYtDlp(
       reportYtDlpOutput(data);
     });
 
-    ytProcess.on('close', (code) => {
+    ytProcess.on('close', async (code) => {
       if (code === 0) {
-        return resolve();
+        try {
+          await verifyVideoFile(outputPath);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+
+        return;
       }
 
       const detail = lastErrorOutput
@@ -394,7 +529,9 @@ async function downloadWithYtDlp(
 }
 
 /**
- * Extract audio using FFmpeg
+ * Extract audio using ffmpeg-static.
+ *
+ * Audio is written directly to disk.
  */
 function extractAudio(
   videoPath,
@@ -413,19 +550,29 @@ function extractAudio(
       [
         '-i',
         videoPath,
+
         '-vn',
+
         '-ar',
         '16000',
+
         '-ac',
         '1',
+
         '-b:a',
-        '128k',
-        audioPath,
+        '64k',
+
         '-y',
+
         '-loglevel',
         'error',
+
+        audioPath,
       ],
-      (err, _stdout, stderr) => {
+      {
+        maxBuffer: 1024 * 1024,
+      },
+      (err, stdout, stderr) => {
         if (err) {
           reject(
             new Error(
@@ -443,7 +590,10 @@ function extractAudio(
 }
 
 /**
- * Process uploaded video
+ * Process uploaded video file.
+ *
+ * Multer already writes the upload to disk,
+ * so we do not load the uploaded file into RAM.
  */
 async function processUploadedFile(
   uploadedFilePath,
@@ -475,58 +625,106 @@ async function processUploadedFile(
       15
     );
 
+  // Check uploaded file before processing.
+  const uploadedStat =
+    await fs.stat(uploadedFilePath);
+
+  if (uploadedStat.size <= 0) {
+    throw new Error(
+      'File video tải lên bị rỗng.'
+    );
+  }
+
+  if (uploadedStat.size > MAX_VIDEO_SIZE) {
+    throw new Error(
+      `Video quá lớn. Giới hạn hiện tại là ${Math.round(
+        MAX_VIDEO_SIZE / 1024 / 1024
+      )} MB.`
+    );
+  }
+
+  /**
+   * First attempt:
+   * Remux/copy video without re-encoding.
+   *
+   * This is much lighter on CPU/RAM.
+   */
   await new Promise((resolve, reject) => {
     execFile(
       ffmpegPath,
       [
         '-i',
         uploadedFilePath,
+
         '-c:v',
         'copy',
+
         '-c:a',
         'aac',
+
         '-movflags',
         '+faststart',
+
         '-y',
+
         videoPath,
       ],
-      (err) => {
+      {
+        maxBuffer: 1024 * 1024,
+      },
+      async (err, stdout, stderr) => {
         if (
           !err &&
-          fs.existsSync(videoPath) &&
-          fs.statSync(videoPath).size > 0
+          (await fs.pathExists(videoPath))
         ) {
-          return resolve();
+          const stat =
+            await fs.stat(videoPath);
+
+          if (stat.size > 0) {
+            return resolve();
+          }
         }
 
+        /**
+         * Fallback:
+         * Re-encode using H.264.
+         *
+         * Still relatively light because of veryfast.
+         */
         execFile(
           ffmpegPath,
           [
             '-i',
             uploadedFilePath,
+
             '-c:v',
             'libx264',
+
             '-preset',
             'veryfast',
+
             '-crf',
             '23',
+
             '-c:a',
             'aac',
+
             '-movflags',
             '+faststart',
+
             '-y',
+
             videoPath,
           ],
-          (
-            transcodeErr,
-            _stdout,
-            stderr
-          ) => {
+          {
+            maxBuffer: 1024 * 1024,
+          },
+          (transcodeErr, stdout2, stderr2) => {
             if (transcodeErr) {
               reject(
                 new Error(
                   `Không thể xử lý file video tải lên: ${
-                    stderr ||
+                    stderr2 ||
                     transcodeErr.message
                   }`
                 )
@@ -540,27 +738,30 @@ async function processUploadedFile(
     );
   });
 
-  if (
-    !fs.existsSync(videoPath) ||
-    (await fs.stat(videoPath)).size === 0
-  ) {
-    throw new Error(
-      'Xử lý file video tải lên thất bại: file trống hoặc không hợp lệ.'
-    );
-  }
+  await verifyVideoFile(videoPath);
 
+  // Extract audio.
   await extractAudio(
     videoPath,
     audioPath,
     onProgress
   );
 
+  // Verify audio.
   if (
-    !fs.existsSync(audioPath) ||
-    (await fs.stat(audioPath)).size === 0
+    !(await fs.pathExists(audioPath))
   ) {
     throw new Error(
-      'Trích xuất audio từ file tải lên thất bại.'
+      'Trích xuất audio thất bại.'
+    );
+  }
+
+  const audioStat =
+    await fs.stat(audioPath);
+
+  if (audioStat.size <= 0) {
+    throw new Error(
+      'File audio bị rỗng.'
     );
   }
 
@@ -571,7 +772,7 @@ async function processUploadedFile(
 }
 
 /**
- * Main process function for URL
+ * Main process function for URL.
  */
 async function processVideo(
   url,
@@ -597,67 +798,109 @@ async function processVideo(
     'audio.mp3'
   );
 
-  if (isDirectVideoUrl(url)) {
-    await downloadDirectVideo(
-      url,
-      videoPath,
-      onProgress
-    );
-  } else if (isTikTokUrl(url)) {
-    try {
-      await downloadTikTokVideo(
+  try {
+    /**
+     * Direct video URL
+     */
+    if (isDirectVideoUrl(url)) {
+      await downloadDirectVideo(
         url,
         videoPath,
         onProgress
       );
-    } catch (tikErr) {
-      console.warn(
-        '[processVideo] TikTok API failed, trying yt-dlp fallback:',
-        tikErr.message
-      );
+    }
 
+    /**
+     * TikTok
+     *
+     * Try TikWM first.
+     * If that fails, use yt-dlp.
+     */
+    else if (isTikTokUrl(url)) {
+      try {
+        await downloadTikTokVideo(
+          url,
+          videoPath,
+          onProgress
+        );
+      } catch (tikErr) {
+        console.warn(
+          '[processVideo] TikTok API failed, trying yt-dlp fallback:',
+          tikErr.message
+        );
+
+        await downloadWithYtDlp(
+          url,
+          videoPath,
+          onProgress
+        );
+      }
+    }
+
+    /**
+     * Other platforms
+     */
+    else {
       await downloadWithYtDlp(
         url,
         videoPath,
         onProgress
       );
     }
-  } else {
-    await downloadWithYtDlp(
-      url,
+
+    /**
+     * Verify final video.
+     */
+    await verifyVideoFile(videoPath);
+
+    /**
+     * Extract audio.
+     */
+    await extractAudio(
       videoPath,
+      audioPath,
       onProgress
     );
-  }
 
-  if (
-    !fs.existsSync(videoPath) ||
-    (await fs.stat(videoPath)).size === 0
-  ) {
-    throw new Error(
-      'Tải video thất bại: file trống hoặc không tồn tại.'
+    /**
+     * Verify audio.
+     */
+    if (
+      !(await fs.pathExists(audioPath))
+    ) {
+      throw new Error(
+        'Trích xuất audio thất bại.'
+      );
+    }
+
+    const audioStat =
+      await fs.stat(audioPath);
+
+    if (audioStat.size <= 0) {
+      throw new Error(
+        'File audio bị rỗng.'
+      );
+    }
+
+    return {
+      videoPath,
+      audioPath,
+    };
+  } catch (error) {
+    /**
+     * Cleanup partially downloaded files
+     * if processing fails.
+     */
+    await fs.remove(videoPath).catch(
+      () => {}
     );
-  }
 
-  await extractAudio(
-    videoPath,
-    audioPath,
-    onProgress
-  );
-
-  if (
-    !fs.existsSync(audioPath) ||
-    (await fs.stat(audioPath)).size === 0
-  ) {
-    throw new Error(
-      'Trích xuất audio thất bại.'
+    await fs.remove(audioPath).catch(
+      () => {}
     );
-  }
 
-  return {
-    videoPath,
-    audioPath,
-  };
+    throw error;
+  }
 }
 
 module.exports = {

@@ -37,7 +37,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB max
+  limits: { fileSize: 200 * 1024 * 1024 }, // 500 MB max
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const isVideoExt = /\.(mp4|mkv|mov|webm|avi|flv|m4v|wmv|ts|3gp|ogv)$/i.test(ext);
@@ -397,9 +397,9 @@ async function runJob(jobId, source, isUpload = false) {
 fs.ensureDir(path.join(__dirname, 'temp')).catch(console.error);
 fs.ensureDir(path.join(__dirname, 'bin')).catch(console.error);
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('\n╔══════════════════════════════════════╗');
   console.log('║       VideoSub AI - Đã khởi động     ║');
-  console.log(`║   http://localhost:${PORT}              ║`);
+  console.log(`║   http://0.0.0.0:${PORT}             ║`);
   console.log('╚══════════════════════════════════════╝\n');
 });
