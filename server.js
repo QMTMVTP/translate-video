@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs-extra');
 const multer = require('multer');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { v4: uuidv4 } = require('uuid');
 
