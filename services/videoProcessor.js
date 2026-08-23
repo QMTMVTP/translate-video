@@ -501,7 +501,7 @@ async function downloadWithYtDlp(
        * YouTube extractor.
        */
       '--extractor-args',
-      'youtube:player_client=web_embedded',
+      'youtube:player_client=default,web_embedded',
 
       /**
        * Avoid keeping unnecessary fragments.
