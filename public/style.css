@@ -383,6 +383,79 @@ body {
 }
 
 /* Platform badges */
+.cookie-row {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cookie-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.cookie-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+
+.cookie-input-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.cookie-icon {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.cookie-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  font-family: inherit;
+  min-width: 0;
+}
+
+.cookie-input::placeholder {
+  color: var(--text-muted);
+}
+
+.cookie-btn {
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cookie-btn:hover {
+  border-color: var(--accent);
+  background: rgba(77, 142, 248, 0.08);
+}
+
+.cookie-hint {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
 .platforms {
   display: flex;
   flex-wrap: wrap;

@@ -40,3 +40,19 @@ test('buildYtDlpArgs should include cookies when configured', () => {
     }
   }
 });
+
+test('buildYtDlpArgs should prefer explicit cookies path over env', () => {
+  const originalCookies = process.env.YTDLP_COOKIES_PATH;
+  process.env.YTDLP_COOKIES_PATH = 'env-cookie.txt';
+
+  try {
+    const args = videoProcessor.buildYtDlpArgs('https://www.youtube.com/watch?v=abc', 'output.mp4', 'explicit-cookie.txt');
+    assert.equal(args[args.indexOf('--cookies') + 1], 'explicit-cookie.txt');
+  } finally {
+    if (originalCookies === undefined) {
+      delete process.env.YTDLP_COOKIES_PATH;
+    } else {
+      process.env.YTDLP_COOKIES_PATH = originalCookies;
+    }
+  }
+});

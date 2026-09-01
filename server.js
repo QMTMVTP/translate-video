@@ -22,7 +22,42 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Ensure upload directory exists
 const uploadDir = path.join(__dirname, 'temp', 'uploads');
+const cookieDir = path.join(__dirname, 'temp', 'cookies');
 fs.ensureDirSync(uploadDir);
+fs.ensureDirSync(cookieDir);
+
+function resolveCookiePath(rawPath = '') {
+  const value = (rawPath || '').trim();
+  if (!value) return '';
+
+  if (path.isAbsolute(value)) {
+    return value;
+  }
+
+  const candidates = [
+    path.resolve(__dirname, value),
+    path.resolve(process.cwd(), value),
+    path.join(cookieDir, value),
+    path.join(uploadDir, value),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return path.join(cookieDir, path.basename(value) || 'youtube.cookies.txt');
+}
+
+async function persistUploadedCookie(file) {
+  if (!file || !file.path) return '';
+
+  const targetPath = path.join(cookieDir, 'youtube.cookies.txt');
+  await fs.ensureDir(cookieDir);
+  await fs.move(file.path, targetPath, { overwrite: true });
+  return targetPath;
+}
 
 // Multer configuration for video file uploads
 const storage = multer.diskStorage({
@@ -46,6 +81,26 @@ const upload = multer({
       cb(null, true);
     } else {
       cb(new Error('Chỉ chấp nhận file video (.mp4, .mkv, .mov, .webm, .avi, .m4v...).'));
+    }
+  },
+});
+
+const cookieUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase() || '.txt';
+      cb(null, `${uuidv4()}${ext}`);
+    },
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowed = /\.(txt|json|ns|cookies|cookie)$/i.test(ext) || !ext;
+    if (allowed) {
+      cb(null, true);
+    } else {
+      cb(new Error('File cookie không hợp lệ. Hãy chọn file .txt, .json, .ns hoặc .cookies.'));
     }
   },
 });
@@ -79,8 +134,44 @@ function getStepProgress(percent) {
 }
 
 // ─── POST /api/process (Process URL) ─────────────────────────────────────────
-app.post('/api/process', async (req, res) => {
-  const { url } = req.body;
+app.post('/api/process', (req, res) => {
+  const contentType = req.headers['content-type'] || '';
+
+  if (contentType.includes('multipart/form-data')) {
+    cookieUpload.single('cookieFile')(req, res, async (err) => {
+      if (err) {
+        console.error('[Cookie Upload Error]', err.message);
+        return res.status(400).json({ error: err.message || 'Lỗi tải lên file cookie.' });
+      }
+
+      const url = (req.body && req.body.url) || '';
+      const cookiesPath = (req.body && req.body.cookiesPath) || '';
+      const uploadedCookieFile = req.file ? await persistUploadedCookie(req.file) : '';
+      const finalCookiesPath = uploadedCookieFile || resolveCookiePath(cookiesPath) || '';
+
+      if (!url || !url.trim()) {
+        return res.status(400).json({ error: 'Vui lòng nhập URL video hợp lệ.' });
+      }
+
+      const jobId = uuidv4();
+      jobs.set(jobId, {
+        status: 'processing',
+        percent: 5,
+        step: 1,
+        stepPercent: 0,
+        message: '🚀 Đang khởi tạo...',
+        logs: [makeLogEntry('Đã nhận link video, đang tạo tác vụ xử lý.')],
+      });
+      res.json({ jobId });
+
+      runJob(jobId, url.trim(), false, finalCookiesPath).catch((jobErr) => {
+        console.error('[Job Error]', jobErr);
+      });
+    });
+    return;
+  }
+
+  const { url, cookiesPath } = req.body || {};
 
   if (!url || !url.trim()) {
     return res.status(400).json({ error: 'Vui lòng nhập URL video hợp lệ.' });
@@ -97,8 +188,7 @@ app.post('/api/process', async (req, res) => {
   });
   res.json({ jobId });
 
-  // Run processing in background
-  runJob(jobId, url.trim(), false).catch((err) => {
+  runJob(jobId, url.trim(), false, resolveCookiePath(cookiesPath) || '').catch((err) => {
     console.error('[Job Error]', err);
   });
 });
@@ -493,7 +583,7 @@ function burnSubtitlesToVideo(
 }
 
 // ─── Background job runner ───────────────────────────────────────────────────
-async function runJob(jobId, source, isUpload = false) {
+async function runJob(jobId, source, isUpload = false, cookiesPath = '') {
   const update = (percent, message, extra = {}) => {
     const current = jobs.get(jobId) || {};
     const stepProgress = getStepProgress(percent);
@@ -521,7 +611,7 @@ async function runJob(jobId, source, isUpload = false) {
     } else {
       const res = await videoProcessor.process(source, jobId, (msg, pct) => {
         update(pct, msg);
-      });
+      }, cookiesPath);
       videoPath = res.videoPath;
       audioPath = res.audioPath;
     }
@@ -590,6 +680,11 @@ async function runJob(jobId, source, isUpload = false) {
 // ─── Startup ─────────────────────────────────────────────────────────────────
 fs.ensureDir(path.join(__dirname, 'temp')).catch(console.error);
 fs.ensureDir(path.join(__dirname, 'bin')).catch(console.error);
+
+// Pre-warm / auto-download yt-dlp binary if missing (Render/Cloud/Docker)
+videoProcessor.getYtDlp().catch((err) => {
+  console.warn('[Startup] yt-dlp pre-warm notice:', err.message);
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('\n╔══════════════════════════════════════╗');

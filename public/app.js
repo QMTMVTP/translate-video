@@ -13,6 +13,9 @@ const uploadTabPane      = document.getElementById('uploadTabPane');
 
 // URL Input
 const videoUrlInput      = document.getElementById('videoUrl');
+const cookiePathInput    = document.getElementById('cookiePathInput');
+const cookieFileInput    = document.getElementById('cookieFileInput');
+const browseCookieBtn    = document.getElementById('browseCookieBtn');
 const translateUrlBtn    = document.getElementById('translateUrlBtn');
 
 // File Upload
@@ -94,6 +97,7 @@ let currentSubtitleColor = '#ffffff';
 let displayedLogKey = '';
 let downloadUrl = '';
 let currentActiveCueIndex = -1;
+let selectedCookieFile = null;
 
 // ── Tab Navigation ──────────────────────────────────────────────────────────
 tabUrlBtn.addEventListener('click', () => switchTab('url'));
@@ -200,6 +204,14 @@ function clearSelectedFile() {
 }
 
 // ── Submission Handlers ─────────────────────────────────────────────────────
+browseCookieBtn.addEventListener('click', () => cookieFileInput.click());
+cookieFileInput.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  selectedCookieFile = file;
+  cookiePathInput.value = file.name;
+});
+
 translateUrlBtn.addEventListener('click', handleTranslateUrl);
 videoUrlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') handleTranslateUrl();
@@ -228,10 +240,25 @@ async function handleTranslateUrl() {
   showProgress(5, '🚀 Đang khởi tạo...');
 
   try {
+    const cookiesPath = cookiePathInput.value.trim();
+    let requestBody;
+    let headers = {};
+
+    if (selectedCookieFile || cookiesPath) {
+      const formData = new FormData();
+      formData.append('url', url);
+      if (cookiesPath) formData.append('cookiesPath', cookiesPath);
+      if (selectedCookieFile) formData.append('cookieFile', selectedCookieFile);
+      requestBody = formData;
+    } else {
+      headers = { 'Content-Type': 'application/json' };
+      requestBody = JSON.stringify({ url, cookiesPath: '' });
+    }
+
     const res = await fetch('/api/process', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      headers,
+      body: requestBody,
     });
 
     const data = await res.json();

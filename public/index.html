@@ -57,6 +57,24 @@
           </button>
         </div>
 
+        <div class="cookie-row">
+          <label class="cookie-label" for="cookiePathInput">File cookie YouTube (tùy chọn)</label>
+          <div class="cookie-input-wrap">
+            <span class="cookie-icon">🍪</span>
+            <input
+              id="cookiePathInput"
+              type="text"
+              class="cookie-input"
+              placeholder="C:/cookies.txt hoặc /home/user/cookies.txt"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="button" class="cookie-btn" id="browseCookieBtn">Chọn file</button>
+            <input type="file" id="cookieFileInput" accept=".txt,.json,.ns,.cookies,.cookie" hidden />
+          </div>
+          <small class="cookie-hint">Dùng khi YouTube yêu cầu xác thực bot. Bạn có thể nhập đường dẫn hoặc tải file cookie lên máy chủ.</small>
+        </div>
+
         <div class="platforms">
           <span class="platform-label">Hỗ trợ:</span>
           <span class="platform-badge">YouTube</span>

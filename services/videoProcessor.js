@@ -418,7 +418,7 @@ async function downloadTikTokVideo(url, outputPath, onProgress) {
 // YT-DLP DOWNLOAD (YouTube, Facebook, Instagram, Twitter, etc.)
 // =========================================================
 
-function buildYtDlpArgs(url, outputPath) {
+function buildYtDlpArgs(url, outputPath, cookiesPath = process.env.YTDLP_COOKIES_PATH) {
   const args = [
     url,
     '-o', outputPath,
@@ -432,22 +432,22 @@ function buildYtDlpArgs(url, outputPath) {
     '--extractor-args', 'youtube:player_client=web_embedded,mweb,android,ios',
   ];
 
-  const cookiePath = process.env.YTDLP_COOKIES_PATH;
-  if (cookiePath && cookiePath.trim()) {
-    args.push('--cookies', cookiePath.trim());
+  const resolvedCookiePath = (cookiesPath || process.env.YTDLP_COOKIES_PATH || '').trim();
+  if (resolvedCookiePath) {
+    args.push('--cookies', resolvedCookiePath);
   }
 
   return args;
 }
 
-async function downloadWithYtDlp(url, outputPath, onProgress) {
+async function downloadWithYtDlp(url, outputPath, onProgress, cookiesPath = process.env.YTDLP_COOKIES_PATH) {
   const platform = getPlatformName(url);
   onProgress?.(`📥 Đang tải video từ ${platform}...`, 12);
 
   const ytPath = await getYtDlp(onProgress);
 
   return new Promise((resolve, reject) => {
-    const args = buildYtDlpArgs(url, outputPath);
+    const args = buildYtDlpArgs(url, outputPath, cookiesPath);
 
     const child = spawn(ytPath, args, {
       windowsHide: true,
@@ -663,7 +663,7 @@ async function processUploadedFile(uploadedFilePath, jobId, onProgress) {
 // MAIN PROCESS (URL)
 // =========================================================
 
-async function processVideo(url, jobId, onProgress) {
+async function processVideo(url, jobId, onProgress, cookiesPath = process.env.YTDLP_COOKIES_PATH) {
   const outputDir = path.join(__dirname, '..', 'temp', jobId);
   await fs.ensureDir(outputDir);
 
@@ -696,12 +696,15 @@ async function processVideo(url, jobId, onProgress) {
         '⚠️ TikTok API thất bại, đang thử phương án dự phòng...',
         12
       );
-      await downloadWithYtDlp(url, videoPath, onProgress);
+      await downloadWithYtDlp(url, videoPath, onProgress, cookiesPath);
     }
   }
   // 3. YouTube and other platforms (Facebook, Instagram, Twitter, etc.)
   else {
-    await downloadWithYtDlp(url, videoPath, onProgress);
+    if (cookiesPath && cookiesPath.trim() && !fs.existsSync(cookiesPath.trim())) {
+      throw new Error('File cookie YouTube không tồn tại trên server. Vui lòng kiểm tra lại đường dẫn hoặc upload lại file cookie.');
+    }
+    await downloadWithYtDlp(url, videoPath, onProgress, cookiesPath);
   }
 
   // Verify video file exists
