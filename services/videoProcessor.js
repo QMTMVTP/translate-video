@@ -10,10 +10,44 @@ const ffmpegPath = require('ffmpeg-static');
 // =========================================================
 
 const BIN_DIR = path.join(__dirname, '..', 'bin');
-const BIN_PATH = path.join(
-  BIN_DIR,
-  process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
-);
+const LOCAL_BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+const BIN_PATH = path.join(BIN_DIR, LOCAL_BIN_NAME);
+
+async function findExecutableInPath(executableName) {
+  const pathEnv = process.env.PATH || '';
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of dirs) {
+    const candidate = path.join(dir, executableName);
+    try {
+      if (await fs.pathExists(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+async function resolveYtDlpBinary() {
+  const preferredNames =
+    process.platform === 'win32'
+      ? ['yt-dlp.exe', 'yt-dlp']
+      : ['yt-dlp', 'yt-dlp.exe'];
+
+  for (const name of preferredNames) {
+    const fromPath = await findExecutableInPath(name);
+    if (fromPath) return fromPath;
+  }
+
+  if (await fs.pathExists(BIN_PATH)) {
+    return BIN_PATH;
+  }
+
+  return null;
+}
 
 // Giới hạn video tải từ URL (mặc định 500 MB)
 const MAX_REMOTE_VIDEO_SIZE_MB = Number(
@@ -28,25 +62,84 @@ const DOWNLOAD_TIMEOUT_MS = Number(
 );
 
 // =========================================================
-// YT-DLP LOCAL
+// YT-DLP LOCAL & AUTO-DOWNLOAD
 // =========================================================
 
 let ytDlpPath = null;
+let ytDlpDownloadPromise = null;
+
+async function downloadYtDlpBinary(targetPath, onProgress) {
+  onProgress?.('🔧 Đang tự động tải bộ công cụ video yt-dlp...', 11);
+  console.log(`[yt-dlp] Downloading binary for platform ${process.platform} to ${targetPath}...`);
+
+  await fs.ensureDir(path.dirname(targetPath));
+
+  // Try YTDlpWrap first
+  try {
+    const YTDlpWrap = require('yt-dlp-wrap').default || require('yt-dlp-wrap');
+    await YTDlpWrap.downloadFromGithub(targetPath);
+    console.log('[yt-dlp] Downloaded via YTDlpWrap successfully.');
+  } catch (err) {
+    console.warn('[yt-dlp] YTDlpWrap download failed, trying direct GitHub release:', err.message);
+
+    const binaryName =
+      process.platform === 'win32'
+        ? 'yt-dlp.exe'
+        : process.platform === 'darwin'
+        ? 'yt-dlp_macos'
+        : 'yt-dlp';
+
+    const githubUrl = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${binaryName}`;
+    const res = await fetch(githubUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      redirect: 'follow',
+    });
+
+    if (!res.ok) {
+      throw new Error(`Tải yt-dlp từ GitHub thất bại: HTTP ${res.status}`);
+    }
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    await fs.writeFile(targetPath, buffer);
+    console.log('[yt-dlp] Downloaded via direct GitHub release successfully.');
+  }
+
+  if (process.platform !== 'win32') {
+    try {
+      await fs.chmod(targetPath, 0o755);
+    } catch (chmodErr) {
+      console.warn('[yt-dlp] chmod failed:', chmodErr.message);
+    }
+  }
+}
 
 async function getYtDlp(onProgress) {
-  if (ytDlpPath) {
+  if (ytDlpPath && (await fs.pathExists(ytDlpPath))) {
+    return ytDlpPath;
+  }
+
+  const existingBinary = await resolveYtDlpBinary();
+  if (existingBinary) {
+    ytDlpPath = existingBinary;
+    if (process.platform !== 'win32') {
+      try {
+        await fs.chmod(ytDlpPath, 0o755);
+      } catch (err) {
+        console.warn('[yt-dlp] Không thể chmod binary:', err.message);
+      }
+    }
+    console.log(`[yt-dlp] Binary đã tìm thấy: ${ytDlpPath}`);
+    onProgress?.('🔧 Đang khởi động công cụ tải video...', 12);
     return ytDlpPath;
   }
 
   await fs.ensureDir(BIN_DIR);
-
-  const hasBinary = await fs.pathExists(BIN_PATH);
-
-  if (!hasBinary) {
-    throw new Error(
-      'Không tìm thấy bin/yt-dlp.exe. Vui lòng kiểm tra lại thư mục bin/.'
-    );
+  console.log(`[yt-dlp] Binary not found at ${BIN_PATH}. Starting auto-download...`);
+  if (!ytDlpDownloadPromise) {
+    ytDlpDownloadPromise = downloadYtDlpBinary(BIN_PATH, onProgress);
   }
+  await ytDlpDownloadPromise;
+  ytDlpDownloadPromise = null;
 
   if (process.platform !== 'win32') {
     try {
@@ -639,4 +732,6 @@ async function processVideo(url, jobId, onProgress) {
 module.exports = {
   process: processVideo,
   processUploadedFile,
+  getYtDlp,
+  resolveYtDlpBinary,
 };
