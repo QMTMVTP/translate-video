@@ -381,7 +381,7 @@ function burnSubtitlesToVideo(
       '-vf',
       `scale=-2:720:force_original_aspect_ratio=decrease,${subtitleFilter}`,
 
-      // Encoder nhẹ hơn cho Render Free
+      // Encoding tối ưu tốc độ
       '-c:v',
       'libx264',
 
@@ -389,20 +389,19 @@ function burnSubtitlesToVideo(
       'ultrafast',
 
       '-crf',
-      '28',
+      '26',
 
-      // Audio nhẹ
       '-c:a',
       'aac',
 
       '-b:a',
-      '64k',
+      '128k',
 
       '-movflags',
       '+faststart',
 
       '-threads',
-      '1',
+      '0',
 
       '-y',
       'video-vietsub.mp4',

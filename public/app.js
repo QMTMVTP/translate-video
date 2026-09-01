@@ -71,8 +71,6 @@ const bgOpacity          = document.getElementById('bgOpacity');
 const bgOpacityValue     = document.getElementById('bgOpacityValue');
 const colorOptions       = document.getElementById('colorOptions');
 const downloadMp4Btn     = document.getElementById('downloadMp4Btn');
-const downloadVttBtn     = document.getElementById('downloadVttBtn');
-const downloadSrtBtn     = document.getElementById('downloadSrtBtn');
 const newVideoBtn        = document.getElementById('newVideoBtn');
 
 // Steps
@@ -812,24 +810,6 @@ colorOptions.addEventListener('click', (e) => {
 downloadMp4Btn.addEventListener('click', () => {
   if (downloadUrl) window.location.assign(downloadUrl);
 });
-
-downloadVttBtn.addEventListener('click', () => {
-  downloadFile(cuesToVTT(cues), 'subtitles-vi.vtt', 'text/vtt;charset=utf-8');
-});
-
-downloadSrtBtn.addEventListener('click', () => {
-  downloadFile(cuesToSRT(cues), 'subtitles-vi.srt', 'text/srt;charset=utf-8');
-});
-
-function downloadFile(content, filename, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 newVideoBtn.addEventListener('click', resetApp);
