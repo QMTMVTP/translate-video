@@ -175,6 +175,40 @@ function isTikTokUrl(url) {
   return /tiktok\.com/i.test(url);
 }
 
+function isRenderEnvironment() {
+  return Boolean(
+    process.env.RENDER ||
+    process.env.RENDER_SERVICE_ID ||
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.RENDER_SERVICE_NAME
+  );
+}
+
+function shouldBlockYouTubeDownload(url, cookiesPath = process.env.YTDLP_COOKIES_PATH) {
+  if (!/youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(url)) {
+    return false;
+  }
+
+  if (!isRenderEnvironment()) {
+    return false;
+  }
+
+  if (process.env.ALLOW_YOUTUBE_ON_RENDER === 'true') {
+    return false;
+  }
+
+  const resolvedCookiePath = (cookiesPath || '').trim();
+  if (!resolvedCookiePath) {
+    return true;
+  }
+
+  if (!fs.existsSync(resolvedCookiePath)) {
+    return true;
+  }
+
+  return false;
+}
+
 function safeRemove(filePath) {
   if (!filePath) return;
   return fs.remove(filePath).catch(() => {});
@@ -715,6 +749,12 @@ async function processVideo(url, jobId, onProgress, cookiesPath = process.env.YT
   }
   // 3. YouTube and other platforms (Facebook, Instagram, Twitter, etc.)
   else {
+    if (shouldBlockYouTubeDownload(url, cookiesPath)) {
+      throw new Error(
+        'YouTube trên Render thường bị chặn bởi anti-bot. Hãy upload file video hoặc dùng link MP4 trực tiếp.'
+      );
+    }
+
     if (cookiesPath && cookiesPath.trim() && !fs.existsSync(cookiesPath.trim())) {
       throw new Error('File cookie YouTube không tồn tại trên server. Vui lòng kiểm tra lại đường dẫn hoặc upload lại file cookie.');
     }
@@ -763,4 +803,6 @@ module.exports = {
   getYtDlp,
   resolveYtDlpBinary,
   buildYtDlpArgs,
+  shouldBlockYouTubeDownload,
+  isRenderEnvironment,
 };

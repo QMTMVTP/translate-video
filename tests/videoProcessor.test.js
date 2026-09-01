@@ -61,3 +61,17 @@ test('buildYtDlpArgs fallback mode should use a broader format selection', () =>
   const args = videoProcessor.buildYtDlpArgs('https://www.youtube.com/watch?v=abc', 'output.mp4', '', 'fallback');
   assert.equal(args[args.indexOf('--format') + 1], 'bestvideo+bestaudio/best');
 });
+
+test('shouldBlockYouTubeDownload should block YouTube on Render without safe conditions', () => {
+  const originalRender = process.env.RENDER;
+  const originalAllow = process.env.ALLOW_YOUTUBE_ON_RENDER;
+  process.env.RENDER = 'true';
+  delete process.env.ALLOW_YOUTUBE_ON_RENDER;
+
+  try {
+    assert.equal(videoProcessor.shouldBlockYouTubeDownload('https://www.youtube.com/watch?v=abc', ''), true);
+  } finally {
+    if (originalRender === undefined) delete process.env.RENDER; else process.env.RENDER = originalRender;
+    if (originalAllow === undefined) delete process.env.ALLOW_YOUTUBE_ON_RENDER; else process.env.ALLOW_YOUTUBE_ON_RENDER = originalAllow;
+  }
+});
