@@ -1,9 +1,10 @@
 /**
- * Translate text to Vietnamese using unofficial Google Translate API
- * No API key required.
+ * Translate text to Vietnamese using unofficial free translation APIs.
+ * Prefer Google Translate, then fallback to a public mirror if Google blocks or returns malformed payload.
  */
 
 const TRANSLATE_URL = 'https://translate.googleapis.com/translate_a/single';
+const ALT_TRANSLATE_URL = 'https://translate.argosopentech.com/translate';
 const BATCH_SIZE = 15;      // segments per batch
 const BATCH_DELAY_MS = 400; // delay between batches to avoid rate limiting
 const SEPARATOR = '\n⟨SEP⟩\n';
@@ -12,15 +13,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Translate a single block of text (may contain multiple lines)
- */
-async function translateText(text) {
+function normalizeTranslatedText(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+async function translateWithGoogle(text) {
   const params = new URLSearchParams({
     client: 'gtx',
     sl: 'auto',
     tl: 'vi',
     dt: 't',
+    ie: 'UTF-8',
+    oe: 'UTF-8',
     q: text,
   });
 
@@ -36,12 +41,83 @@ async function translateText(text) {
 
   const data = await res.json();
 
-  // data[0] is array of [translatedChunk, originalChunk, ...]
+  if (!Array.isArray(data) || !Array.isArray(data[0])) {
+    throw new Error('Google Translate trả về payload không hợp lệ.');
+  }
+
   const translated = data[0]
-    .map((item) => (item[0] || ''))
+    .map((item) => (Array.isArray(item) ? item[0] || '' : ''))
     .join('');
 
-  return translated;
+  const normalized = normalizeTranslatedText(translated);
+  if (!normalized) {
+    throw new Error('Google Translate không trả về văn bản dịch.');
+  }
+
+  return normalized;
+}
+
+async function translateWithArgos(text) {
+  const res = await fetch(ALT_TRANSLATE_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0',
+    },
+    body: JSON.stringify({
+      q: text,
+      source: 'auto',
+      target: 'vi',
+      format: 'text',
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Argos Translate trả về lỗi HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  const translated =
+    data?.translatedText ||
+    data?.data?.translatedText ||
+    data?.[0]?.translations?.[0]?.translatedText ||
+    data?.[0]?.translatedText ||
+    '';
+
+  const normalized = normalizeTranslatedText(String(translated || ''));
+  if (!normalized) {
+    throw new Error('Argos Translate không trả về văn bản dịch.');
+  }
+
+  return normalized;
+}
+
+/**
+ * Translate a single block of text (may contain multiple lines)
+ */
+async function translateText(text) {
+  const safeText = typeof text === 'string' ? text.trim() : '';
+  if (!safeText) {
+    return '';
+  }
+
+  let lastError;
+
+  try {
+    return await translateWithGoogle(safeText);
+  } catch (err) {
+    lastError = err;
+    console.warn('[Translator] Google Translate failed, trying fallback provider:', err.message);
+  }
+
+  try {
+    return await translateWithArgos(safeText);
+  } catch (err) {
+    lastError = err;
+    console.warn('[Translator] Fallback provider failed:', err.message);
+  }
+
+  throw new Error(lastError?.message || 'Không thể dịch văn bản sang tiếng Việt.');
 }
 
 /**

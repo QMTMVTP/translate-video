@@ -374,6 +374,19 @@ app.post('/api/subtitles/:jobId', async (req, res) => {
     const subtitlePath = path.join(outputDir, subtitleFilename);
     await fs.writeFile(subtitlePath, srtContent, 'utf-8');
 
+    const update = (percent, message) => {
+      const current = jobs.get(jobId) || {};
+      jobs.set(jobId, {
+        ...current,
+        status: 'processing',
+        percent,
+        step: 4,
+        stepPercent: Math.min(100, Math.max(0, percent)),
+        message,
+        logs: appendJobLog(current, message),
+      });
+    };
+
     update(97, '🎬 Đang chèn phụ đề tiếng Việt vào video MP4...');
 
     await burnSubtitlesToVideo(outputDir, subtitleFilename);
@@ -414,7 +427,7 @@ app.post('/api/subtitles/:jobId', async (req, res) => {
       videoUrl: `/api/video/${jobId}`,
       downloadUrl: `/api/download/${jobId}`,
       vttContent,
-      segments: translated,
+      segments: Array.isArray(segments) ? segments : [],
       logs: appendJobLog(
         current,
         'Đã hoàn tất xử lý video và chèn phụ đề tiếng Việt.'
