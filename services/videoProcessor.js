@@ -418,6 +418,28 @@ async function downloadTikTokVideo(url, outputPath, onProgress) {
 // YT-DLP DOWNLOAD (YouTube, Facebook, Instagram, Twitter, etc.)
 // =========================================================
 
+function buildYtDlpArgs(url, outputPath) {
+  const args = [
+    url,
+    '-o', outputPath,
+    '--format', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    '--merge-output-format', 'mp4',
+    '--no-playlist',
+    '--no-warnings',
+    '--newline',
+    '--progress',
+    '--ffmpeg-location', ffmpegPath,
+    '--extractor-args', 'youtube:player_client=web_embedded,mweb,android,ios',
+  ];
+
+  const cookiePath = process.env.YTDLP_COOKIES_PATH;
+  if (cookiePath && cookiePath.trim()) {
+    args.push('--cookies', cookiePath.trim());
+  }
+
+  return args;
+}
+
 async function downloadWithYtDlp(url, outputPath, onProgress) {
   const platform = getPlatformName(url);
   onProgress?.(`📥 Đang tải video từ ${platform}...`, 12);
@@ -425,18 +447,7 @@ async function downloadWithYtDlp(url, outputPath, onProgress) {
   const ytPath = await getYtDlp(onProgress);
 
   return new Promise((resolve, reject) => {
-    const args = [
-      url,
-      '-o', outputPath,
-      '--format', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-      '--merge-output-format', 'mp4',
-      '--no-playlist',
-      '--no-warnings',
-      '--newline',
-      '--progress',
-      '--ffmpeg-location', ffmpegPath,
-      '--extractor-args', 'youtube:player_client=web_embedded,mweb,android,ios',
-    ];
+    const args = buildYtDlpArgs(url, outputPath);
 
     const child = spawn(ytPath, args, {
       windowsHide: true,
@@ -734,4 +745,5 @@ module.exports = {
   processUploadedFile,
   getYtDlp,
   resolveYtDlpBinary,
+  buildYtDlpArgs,
 };
