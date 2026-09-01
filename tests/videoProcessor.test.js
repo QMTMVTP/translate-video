@@ -56,3 +56,8 @@ test('buildYtDlpArgs should prefer explicit cookies path over env', () => {
     }
   }
 });
+
+test('buildYtDlpArgs fallback mode should use a broader format selection', () => {
+  const args = videoProcessor.buildYtDlpArgs('https://www.youtube.com/watch?v=abc', 'output.mp4', '', 'fallback');
+  assert.equal(args[args.indexOf('--format') + 1], 'bestvideo+bestaudio/best');
+});

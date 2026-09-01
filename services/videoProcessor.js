@@ -418,11 +418,16 @@ async function downloadTikTokVideo(url, outputPath, onProgress) {
 // YT-DLP DOWNLOAD (YouTube, Facebook, Instagram, Twitter, etc.)
 // =========================================================
 
-function buildYtDlpArgs(url, outputPath, cookiesPath = process.env.YTDLP_COOKIES_PATH) {
+function buildYtDlpArgs(url, outputPath, cookiesPath = process.env.YTDLP_COOKIES_PATH, mode = 'primary') {
+  const format =
+    mode === 'fallback'
+      ? 'bestvideo+bestaudio/best'
+      : 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+
   const args = [
     url,
     '-o', outputPath,
-    '--format', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    '--format', format,
     '--merge-output-format', 'mp4',
     '--no-playlist',
     '--no-warnings',
@@ -446,8 +451,8 @@ async function downloadWithYtDlp(url, outputPath, onProgress, cookiesPath = proc
 
   const ytPath = await getYtDlp(onProgress);
 
-  return new Promise((resolve, reject) => {
-    const args = buildYtDlpArgs(url, outputPath, cookiesPath);
+  const runAttempt = (mode) => new Promise((resolve, reject) => {
+    const args = buildYtDlpArgs(url, outputPath, cookiesPath, mode);
 
     const child = spawn(ytPath, args, {
       windowsHide: true,
@@ -541,12 +546,21 @@ async function downloadWithYtDlp(url, outputPath, onProgress, cookiesPath = proc
         .slice(-5)
         .join('\n');
 
+      const isFormatIssue = /Requested format is not available|list-formats|not available/i.test(detail || '');
+      if (mode === 'primary' && isFormatIssue) {
+        console.warn('[yt-dlp] Primary format failed, retrying with fallback format:', detail);
+        finished = true;
+        return resolve(runAttempt('fallback'));
+      }
+
       finished = true;
       reject(
         new Error(`yt-dlp thoát với mã lỗi ${code}${detail ? `: ${detail}` : ''}`)
       );
     });
   });
+
+  return runAttempt('primary');
 }
 
 // =========================================================
