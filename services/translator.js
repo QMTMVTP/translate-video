@@ -129,6 +129,10 @@ async function translateText(text) {
  * @returns {Array<{start, end, text}>}
  */
 async function translateSegments(segments, onProgress) {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return [];
+  }
+
   const results = new Array(segments.length);
   const totalBatches = Math.ceil(segments.length / BATCH_SIZE);
 
@@ -144,11 +148,25 @@ async function translateSegments(segments, onProgress) {
     try {
       translatedCombined = await translateText(combined);
     } catch (err) {
-      console.warn(`[Translator] Batch ${batchIdx} failed, using original text. Error:`, err.message);
-      // Fallback: keep original text
-      batch.forEach((seg, i) => {
-        results[start + i] = { ...seg };
-      });
+      console.warn(`[Translator] Batch ${batchIdx} failed, retrying segment-by-segment. Error:`, err.message);
+
+      for (let i = 0; i < batch.length; i++) {
+        try {
+          const singleTranslated = await translateText(batch[i].text);
+          results[start + i] = { ...batch[i], text: singleTranslated.trim() };
+        } catch (singleErr) {
+          console.error(`[Translator] Segment ${start + i} failed translation:`, singleErr.message);
+          throw new Error(`Dịch thất bại ở đoạn ${start + i + 1}: ${singleErr.message}`);
+        }
+      }
+
+      if (onProgress) {
+        onProgress((batchIdx + 1) / totalBatches);
+      }
+
+      if (batchIdx < totalBatches - 1) {
+        await sleep(BATCH_DELAY_MS);
+      }
       continue;
     }
 
