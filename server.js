@@ -703,5 +703,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('\n╔══════════════════════════════════════╗');
   console.log('║       VideoSub AI - Đã khởi động     ║');
   console.log(`║   http://0.0.0.0:${PORT}             ║`);
+  console.log(`║                                      ║`);
   console.log('╚══════════════════════════════════════╝\n');
 });
