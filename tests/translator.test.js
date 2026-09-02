@@ -38,3 +38,43 @@ test('translateText should fall back to alternate provider when Google response 
     global.fetch = originalFetch;
   }
 });
+
+test('translateSegments should not keep original Japanese text when batch split fails', async () => {
+  const originalFetch = global.fetch;
+
+  global.fetch = async (url) => {
+    const urlString = String(url);
+
+    if (urlString.includes('translate.googleapis.com')) {
+      return {
+        ok: true,
+        json: async () => ({
+          data: [[['xin chào\n⟨SEP⟩\ntôi khỏe', 'hello\n⟨SEP⟩\nhow are you']]],
+        }),
+      };
+    }
+
+    if (urlString.includes('translate.argosopentech.com')) {
+      return {
+        ok: true,
+        json: async () => ({ translatedText: 'xin chào' }),
+      };
+    }
+
+    throw new Error(`Unexpected URL: ${urlString}`);
+  };
+
+  try {
+    const result = await translator.translateSegments(
+      [
+        { start: 0, end: 2, text: 'hello' },
+        { start: 2, end: 4, text: 'how are you' },
+      ],
+      () => {}
+    );
+
+    assert.deepEqual(result.map((segment) => segment.text), ['xin chào', 'tôi khỏe']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

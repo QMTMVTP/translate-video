@@ -5,12 +5,25 @@
 
 const TRANSLATE_URL = 'https://translate.googleapis.com/translate_a/single';
 const ALT_TRANSLATE_URL = 'https://translate.argosopentech.com/translate';
-const BATCH_SIZE = 15;      // segments per batch
-const BATCH_DELAY_MS = 400; // delay between batches to avoid rate limiting
+const BATCH_SIZE = 5;      // reduce burst size to avoid 429 rate limiting
+const BATCH_DELAY_MS = 800; // delay between batches to avoid rate limiting
+const REQUEST_TIMEOUT_MS = 15000;
+const MAX_RETRIES = 2;
 const SEPARATOR = '\n⟨SEP⟩\n';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function normalizeTranslatedText(value) {
@@ -18,78 +31,138 @@ function normalizeTranslatedText(value) {
   return value.trim();
 }
 
+function splitTranslatedBatch(value, expectedCount) {
+  const variants = [
+    SEPARATOR,
+    '⟨SEP⟩',
+    '\n\n',
+    '\n',
+  ];
+
+  for (const separator of variants) {
+    const parts = value
+      .split(separator)
+      .map((part) => normalizeTranslatedText(part));
+
+    if (parts.length === expectedCount && parts.every(Boolean)) {
+      return parts;
+    }
+  }
+
+  const fallbackParts = value
+    .replace(/\r/g, '')
+    .split(/\n\s*\n+/)
+    .map((part) => normalizeTranslatedText(part));
+
+  if (fallbackParts.length === expectedCount && fallbackParts.every(Boolean)) {
+    return fallbackParts;
+  }
+
+  return null;
+}
+
 async function translateWithGoogle(text) {
-  const params = new URLSearchParams({
-    client: 'gtx',
-    sl: 'auto',
-    tl: 'vi',
-    dt: 't',
-    ie: 'UTF-8',
-    oe: 'UTF-8',
-    q: text,
-  });
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      const params = new URLSearchParams({
+        client: 'gtx',
+        sl: 'auto',
+        tl: 'vi',
+        dt: 't',
+        ie: 'UTF-8',
+        oe: 'UTF-8',
+        q: text,
+      });
 
-  const res = await fetch(`${TRANSLATE_URL}?${params.toString()}`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-    },
-  });
+      const res = await fetchWithTimeout(`${TRANSLATE_URL}?${params.toString()}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+        },
+      });
 
-  if (!res.ok) {
-    throw new Error(`Google Translate trả về lỗi HTTP ${res.status}`);
+      if (res.status === 429) {
+        throw new Error('Google Translate trả về lỗi HTTP 429 (rate limit).');
+      }
+
+      if (!res.ok) {
+        throw new Error(`Google Translate trả về lỗi HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      if (!Array.isArray(data) || !Array.isArray(data[0])) {
+        throw new Error('Google Translate trả về payload không hợp lệ.');
+      }
+
+      const translated = data[0]
+        .map((item) => (Array.isArray(item) ? item[0] || '' : ''))
+        .join('');
+
+      const normalized = normalizeTranslatedText(translated);
+      if (!normalized) {
+        throw new Error('Google Translate không trả về văn bản dịch.');
+      }
+
+      return normalized;
+    } catch (err) {
+      if (attempt <= MAX_RETRIES) {
+        console.warn(`[Translator] Google retry ${attempt}/${MAX_RETRIES}:`, err.message);
+        await sleep(1500 * attempt);
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const data = await res.json();
-
-  if (!Array.isArray(data) || !Array.isArray(data[0])) {
-    throw new Error('Google Translate trả về payload không hợp lệ.');
-  }
-
-  const translated = data[0]
-    .map((item) => (Array.isArray(item) ? item[0] || '' : ''))
-    .join('');
-
-  const normalized = normalizeTranslatedText(translated);
-  if (!normalized) {
-    throw new Error('Google Translate không trả về văn bản dịch.');
-  }
-
-  return normalized;
 }
 
 async function translateWithArgos(text) {
-  const res = await fetch(ALT_TRANSLATE_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0',
-    },
-    body: JSON.stringify({
-      q: text,
-      source: 'auto',
-      target: 'vi',
-      format: 'text',
-    }),
-  });
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      const res = await fetchWithTimeout(ALT_TRANSLATE_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0',
+        },
+        body: JSON.stringify({
+          q: text,
+          source: 'auto',
+          target: 'vi',
+          format: 'text',
+        }),
+      });
 
-  if (!res.ok) {
-    throw new Error(`Argos Translate trả về lỗi HTTP ${res.status}`);
+      if (res.status === 429) {
+        throw new Error('Argos Translate trả về lỗi HTTP 429 (rate limit).');
+      }
+
+      if (!res.ok) {
+        throw new Error(`Argos Translate trả về lỗi HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const translated =
+        data?.translatedText ||
+        data?.data?.translatedText ||
+        data?.[0]?.translations?.[0]?.translatedText ||
+        data?.[0]?.translatedText ||
+        '';
+
+      const normalized = normalizeTranslatedText(String(translated || ''));
+      if (!normalized) {
+        throw new Error('Argos Translate không trả về văn bản dịch.');
+      }
+
+      return normalized;
+    } catch (err) {
+      if (attempt <= MAX_RETRIES) {
+        console.warn(`[Translator] Argos retry ${attempt}/${MAX_RETRIES}:`, err.message);
+        await sleep(1500 * attempt);
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const data = await res.json();
-  const translated =
-    data?.translatedText ||
-    data?.data?.translatedText ||
-    data?.[0]?.translations?.[0]?.translatedText ||
-    data?.[0]?.translatedText ||
-    '';
-
-  const normalized = normalizeTranslatedText(String(translated || ''));
-  if (!normalized) {
-    throw new Error('Argos Translate không trả về văn bản dịch.');
-  }
-
-  return normalized;
 }
 
 /**
@@ -153,7 +226,12 @@ async function translateSegments(segments, onProgress) {
       for (let i = 0; i < batch.length; i++) {
         try {
           const singleTranslated = await translateText(batch[i].text);
-          results[start + i] = { ...batch[i], text: singleTranslated.trim() };
+          const normalized = normalizeTranslatedText(singleTranslated);
+          if (!normalized) {
+            throw new Error(`Bản dịch rỗng cho đoạn ${start + i + 1}.`);
+          }
+          results[start + i] = { ...batch[i], text: normalized };
+          await sleep(100);
         } catch (singleErr) {
           console.error(`[Translator] Segment ${start + i} failed translation:`, singleErr.message);
           throw new Error(`Dịch thất bại ở đoạn ${start + i + 1}: ${singleErr.message}`);
@@ -170,32 +248,34 @@ async function translateSegments(segments, onProgress) {
       continue;
     }
 
-    // Split translated text back by separator
-    // Google Translate may change casing/spacing of the separator slightly, so try multiple splits
-    let parts = translatedCombined.split(SEPARATOR);
+    const parts = splitTranslatedBatch(translatedCombined, batch.length);
 
-    // Fallback: if separator was not preserved, try alternate forms
-    if (parts.length !== batch.length) {
-      parts = translatedCombined.split('⟨SEP⟩').map((p) => p.replace(/^\n|\n$/g, ''));
-    }
-
-    // Final fallback: if still mismatched, translate individually
-    if (parts.length !== batch.length) {
-      console.warn(`[Translator] Separator split mismatch (got ${parts.length}, expected ${batch.length}). Translating individually...`);
+    if (!parts) {
+      console.warn(`[Translator] Separator split mismatch for batch ${batchIdx + 1}. Translating individually...`);
       for (let i = 0; i < batch.length; i++) {
         try {
           const singleTranslated = await translateText(batch[i].text);
-          results[start + i] = { ...batch[i], text: singleTranslated.trim() };
+          const normalized = normalizeTranslatedText(singleTranslated);
+          if (!normalized) {
+            throw new Error(`Bản dịch rỗng cho đoạn ${start + i + 1}.`);
+          }
+          results[start + i] = { ...batch[i], text: normalized };
           await sleep(100);
-        } catch {
-          results[start + i] = { ...batch[i] };
+        } catch (singleErr) {
+          console.error(`[Translator] Segment ${start + i} failed translation after split mismatch:`, singleErr.message);
+          throw new Error(`Dịch thất bại ở đoạn ${start + i + 1}: ${singleErr.message}`);
         }
       }
     } else {
       batch.forEach((seg, i) => {
+        const translatedText = normalizeTranslatedText(parts[i]);
+        if (!translatedText) {
+          throw new Error(`Không có bản dịch cho đoạn ${start + i + 1}.`);
+        }
+
         results[start + i] = {
           ...seg,
-          text: (parts[i] || seg.text).trim(),
+          text: translatedText,
         };
       });
     }
